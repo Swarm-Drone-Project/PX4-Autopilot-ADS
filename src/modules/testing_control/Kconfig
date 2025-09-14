@@ -1,0 +1,12 @@
+menuconfig MODULES_TESTING_CONTROL
+	bool "testing_control"
+	default n
+	---help---
+		Enable support for testing_control
+
+menuconfig USER_TESTING_CONTROL
+	bool "testing_control running as userspace module"
+	default n
+	depends on BOARD_PROTECTED && MODULES_TESTING_CONTROL
+	---help---
+		Put testing_control in userspace memory
