@@ -1,0 +1,5 @@
+menuconfig MODULES_TEST_FILTER
+	bool "test_filter"
+	default n
+	---help---
+		Enable support for test_filter - Simple complementary filter for attitude estimation
