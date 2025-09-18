@@ -51,83 +51,61 @@ void CustomAttitudeControl::Run()
 
     // Get current attitude
     vehicle_attitude_s vehicle_attitude;
-    if (!_vehicle_attitude_sub.update(&vehicle_attitude)) {
-        perf_end(_loop_perf);
-        return; // No new attitude data
+    if (_vehicle_attitude_sub.update(&vehicle_attitude)) {
+
+	const hrt_abstime now = vehicle_attitude.timestamp_sample;
+	const float dt = math::constrain(((now - _last_run) * 1e-6f), 0.000125f, 0.02f);;
+	_last_run = now;
+
+	// Current attitude quaternion
+	const Quatf q_current(vehicle_attitude.q);
+
+	// Get attitude setpoint (default to level if no setpoint)
+	vehicle_attitude_setpoint_s attitude_setpoint{};
+	Quatf q_setpoint(1.0f, 0.0f, 0.0f, 0.0f); // Default: level attitude
+
+	// Initialize default thrust (X500 hover thrust ~ -0.5 in NED frame)
+	attitude_setpoint.thrust_body[0] = 0.0f;   // No forward thrust
+	attitude_setpoint.thrust_body[1] = 0.0f;   // No sideways thrust
+	attitude_setpoint.thrust_body[2] = -0.8f;  // Default hover thrust (negative = upward in NED)
+	if (_vehicle_attitude_setpoint_sub.updated()) {
+		if (_vehicle_attitude_setpoint_sub.copy(&attitude_setpoint)) {
+			q_setpoint = Quatf(attitude_setpoint.q_d);
+			// Thrust values will be from the setpoint
+		}
+	}
+
+	// Calculate attitude error
+	const Quatf q_error = q_setpoint * q_current.inversed();
+
+	// Convert quaternion error to axis-angle (small angle approximation)
+	Vector3f attitude_error;
+	if (q_error(0) >= 0.0f) {
+		attitude_error = 2.0f * Vector3f(q_error(1), q_error(2), q_error(3));
+	} else {
+		attitude_error = -2.0f * Vector3f(q_error(1), q_error(2), q_error(3));
+	}
+
+	// Simple PID control
+	Vector3f rates_setpoint = pid_controller(attitude_error, dt);
+
+	// Publish rate setpoint
+	vehicle_rates_setpoint_s rates_sp{};
+	rates_sp.timestamp = now;
+	rates_sp.roll = rates_setpoint(0);
+	rates_sp.pitch = rates_setpoint(1);
+	rates_sp.yaw = rates_setpoint(2);
+
+	// Use thrust from attitude setpoint (essential for flight!)
+	rates_sp.thrust_body[0] = attitude_setpoint.thrust_body[0];  // Forward thrust
+	rates_sp.thrust_body[1] = attitude_setpoint.thrust_body[1];  // Right thrust
+	rates_sp.thrust_body[2] = attitude_setpoint.thrust_body[2];  // Down thrust (negative = up)
+
+	_vehicle_rates_setpoint_pub.publish(rates_sp);
+
     }
 
-    // CRITICAL: Calculate time delta with high precision
-    const hrt_abstime now = hrt_absolute_time();
-    const float dt = (_last_run != 0) ? (now - _last_run) * 1e-6f : ATTITUDE_CTRL_EXPECTED_DT;
-    _last_run = now;
-
-    // CRITICAL: Measure interval between executions
-    perf_count(_loop_interval_perf);
-
-    // CRITICAL: Guard against bad dt - this could cause instability or oscillations
-    if (dt < ATTITUDE_CTRL_MIN_DT || dt > ATTITUDE_CTRL_MAX_DT) {
-        PX4_WARN("CRITICAL: Bad dt: %.6f ms (expected: %.1f ms) - SKIPPING CONTROL CYCLE",
-                 (double)(dt * 1000.0f), (double)(ATTITUDE_CTRL_EXPECTED_DT * 1000.0f));
-        perf_end(_loop_perf);
-        return;
-    }
-
-    // CRITICAL: Warn if timing is degraded but still acceptable
-    if (dt > ATTITUDE_CTRL_EXPECTED_DT * 1.5f) {
-        static uint64_t last_warn = 0;
-        if (now - last_warn > 1000000) { // Warn max once per second
-            PX4_WARN("Degraded timing: %.2f ms (expected: %.1f ms)",
-                     (double)(dt * 1000.0f), (double)(ATTITUDE_CTRL_EXPECTED_DT * 1000.0f));
-            last_warn = now;
-        }
-    }
-
-    // X500 quadcopter - attitude control always enabled
-    // Current attitude quaternion
-    const Quatf q_current(vehicle_attitude.q);
-
-    // Get attitude setpoint (default to level if no setpoint)
-    vehicle_attitude_setpoint_s attitude_setpoint{};
-    Quatf q_setpoint(1.0f, 0.0f, 0.0f, 0.0f); // Default: level attitude
-
-    // Initialize default thrust (X500 hover thrust ~ -0.5 in NED frame)
-    attitude_setpoint.thrust_body[0] = 0.0f;   // No forward thrust
-    attitude_setpoint.thrust_body[1] = 0.0f;   // No sideways thrust
-    attitude_setpoint.thrust_body[2] = -0.5f;  // Default hover thrust (negative = upward in NED)
-
-    if (_vehicle_attitude_setpoint_sub.copy(&attitude_setpoint)) {
-        q_setpoint = Quatf(attitude_setpoint.q_d);
-        // Thrust values will be from the setpoint
-    }
-
-    // Calculate attitude error
-    const Quatf q_error = q_setpoint * q_current.inversed();
-
-    // Convert quaternion error to axis-angle (small angle approximation)
-    Vector3f attitude_error;
-    if (q_error(0) >= 0.0f) {
-        attitude_error = 2.0f * Vector3f(q_error(1), q_error(2), q_error(3));
-    } else {
-        attitude_error = -2.0f * Vector3f(q_error(1), q_error(2), q_error(3));
-    }
-
-    // Simple PID control
-    Vector3f rates_setpoint = pid_controller(attitude_error, dt);
-
-    // Publish rate setpoint
-    vehicle_rates_setpoint_s rates_sp{};
-    rates_sp.timestamp = now;
-    rates_sp.roll = rates_setpoint(0);
-    rates_sp.pitch = rates_setpoint(1);
-    rates_sp.yaw = rates_setpoint(2);
-
-    // Use thrust from attitude setpoint (essential for flight!)
-    rates_sp.thrust_body[0] = attitude_setpoint.thrust_body[0];  // Forward thrust
-    rates_sp.thrust_body[1] = attitude_setpoint.thrust_body[1];  // Right thrust
-    rates_sp.thrust_body[2] = attitude_setpoint.thrust_body[2];  // Down thrust (negative = up)
-
-    _vehicle_rates_setpoint_pub.publish(rates_sp);
-
+    
     // CRITICAL: End performance measurement
     perf_end(_loop_perf);
 }
