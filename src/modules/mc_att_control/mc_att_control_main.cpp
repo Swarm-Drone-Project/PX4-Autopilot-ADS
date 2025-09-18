@@ -245,6 +245,7 @@ MulticopterAttitudeControl::Run()
 
 		// Guard against too small (< 0.2ms) and too large (> 20ms) dt's.
 		const float dt = math::constrain(((v_att.timestamp_sample - _last_run) * 1e-6f), 0.0002f, 0.02f);
+		// PX4_INFO("dt: %.6f seconds", (double)dt);
 		_last_run = v_att.timestamp_sample;
 
 		const Quatf q{v_att.q};
@@ -290,7 +291,7 @@ MulticopterAttitudeControl::Run()
 
 		const bool run_att_ctrl = _vehicle_control_mode.flag_control_attitude_enabled
 					  && (is_hovering || is_tailsitter_transition);
-
+		
 		if (run_att_ctrl) {
 			// Generate the attitude setpoint from stick inputs if we are in Manual/Stabilized mode
 			if (_vehicle_control_mode.flag_control_manual_enabled &&
@@ -392,6 +393,7 @@ MulticopterAttitudeControl::Run()
 	}
 
 	perf_end(_loop_perf);
+
 }
 
 int MulticopterAttitudeControl::task_spawn(int argc, char *argv[])
@@ -427,6 +429,16 @@ int MulticopterAttitudeControl::task_spawn(int argc, char *argv[])
 
 int MulticopterAttitudeControl::custom_command(int argc, char *argv[])
 {
+	if (!is_running()) {
+		PX4_ERR("not running");
+		return PX4_ERROR;
+	}
+
+	MulticopterAttitudeControl *instance = _object.load();
+	if (instance) {
+		return instance->custom_command_instance(argc, argv);
+	}
+
 	return print_usage("unknown command");
 }
 
@@ -456,9 +468,103 @@ https://www.research-collection.ethz.ch/bitstream/handle/20.500.11850/154099/eth
 	PRINT_MODULE_USAGE_NAME("mc_att_control", "controller");
 	PRINT_MODULE_USAGE_COMMAND("start");
 	PRINT_MODULE_USAGE_ARG("vtol", "VTOL mode", true);
+	PRINT_MODULE_USAGE_COMMAND_DESCR("performance", "Show performance counters and timing information");
+	PRINT_MODULE_USAGE_COMMAND_DESCR("status", "Show class variables and controller status");
 	PRINT_MODULE_USAGE_DEFAULT_COMMANDS();
 
 	return 0;
+}
+
+int MulticopterAttitudeControl::custom_command_instance(int argc, char *argv[])
+{
+	PX4_INFO("Custom command called. argc: %d argv[0]: %s", argc, argv[0]);
+	if (argc < 1) {
+		PX4_INFO("Usage: mc_att_control <command>");
+		PX4_INFO("Commands:");
+		PX4_INFO("  perf  - Show performance counters");
+		PX4_INFO("  stats       - Show class variables and status");
+		return PX4_ERROR;
+	}
+	const char *command = argv[0];
+	if (!strcmp(command, "perf")) {
+		// Display performance information
+		PX4_INFO("=== Performance Counters ===");
+		if (_loop_perf) {
+			PX4_INFO("Loop Performance:");
+			PX4_INFO("  Count: %lu", perf_event_count(_loop_perf));
+			PX4_INFO("  Mean: %.3f ms", (double)perf_mean(_loop_perf) / 1000.0);
+			// PX4_INFO("  Least: %.3f ms", (double)perf_least(_loop_perf) / 1000.0);
+			// PX4_INFO("  Most: %.3f ms", (double)perf_most(_loop_perf) / 1000.0);
+		}
+		
+		// Show timing information
+		const hrt_abstime now = hrt_absolute_time();
+		PX4_INFO("Timing:");
+		PX4_INFO("  Current time: %lu us", now);
+		PX4_INFO("  Last run: %lu us", _last_run);
+		PX4_INFO("  Time since last run: %.3f ms", (now - _last_run) / 1000.0);
+		PX4_INFO("  Last attitude setpoint: %lu us", _last_attitude_setpoint);
+
+		return PX4_OK;
+	}
+	
+	if (!strcmp(command, "stats")) {
+		// Display class variables and status
+		PX4_INFO("=== MulticopterAttitudeControl Status ===");
+		
+		// Vehicle state
+		PX4_INFO("Vehicle State:");
+		PX4_INFO("  Landed: %s", _landed ? "true" : "false");
+		PX4_INFO("  Spooled up: %s", _spooled_up ? "true" : "false");
+		PX4_INFO("  Rotary wing: %s", _vehicle_type_rotary_wing ? "true" : "false");
+		PX4_INFO("  VTOL: %s", _vtol ? "true" : "false");
+		PX4_INFO("  VTOL tailsitter: %s", _vtol_tailsitter ? "true" : "false");
+		PX4_INFO("  VTOL in transition: %s", _vtol_in_transition_mode ? "true" : "false");
+		
+		// Control parameters
+		PX4_INFO("Control Parameters:");
+		PX4_INFO("  Manual tilt max: %.3f rad (%.1f deg)", (double)_man_tilt_max, (double)math::degrees(_man_tilt_max));
+		PX4_INFO("  Yaw setpoint stabilized: %.3f rad (%.1f deg)", (double)_yaw_setpoint_stabilized, (double)math::degrees(_yaw_setpoint_stabilized));
+		PX4_INFO("  Heading good for control: %s", _heading_good_for_control ? "true" : "false");
+		PX4_INFO("  Unaided heading: %.3f rad (%.1f deg)", (double)_unaided_heading, (double)math::degrees(_unaided_heading));
+		
+		// Thrust and throttle
+		PX4_INFO("Thrust/Throttle:");
+		PX4_INFO("  Hover thrust estimate: %.3f", (double)_hover_thrust_estimate);
+		PX4_INFO("  Manual throttle min: %.3f", (double)_manual_throttle_minimum.getState());
+		PX4_INFO("  Manual throttle max: %.3f", (double)_manual_throttle_maximum.getState());
+		PX4_INFO("  Hover thrust slew rate: %.3f", (double)_hover_thrust_slew_rate.getState());
+		
+		// Thrust setpoint body
+		PX4_INFO("  Thrust setpoint body: [%.3f, %.3f, %.3f]", 
+			(double)_thrust_setpoint_body(0), 
+			(double)_thrust_setpoint_body(1), 
+			(double)_thrust_setpoint_body(2));
+		
+		// Manual control inputs (if available)
+		PX4_INFO("Manual Control:");
+		PX4_INFO("  Roll: %.3f", (double)_manual_control_setpoint.roll);
+		PX4_INFO("  Pitch: %.3f", (double)_manual_control_setpoint.pitch);
+		PX4_INFO("  Yaw: %.3f", (double)_manual_control_setpoint.yaw);
+		PX4_INFO("  Throttle: %.3f", (double)_manual_control_setpoint.throttle);
+		
+		// Control mode flags
+		PX4_INFO("Control Mode:");
+		PX4_INFO("  Manual enabled: %s", _vehicle_control_mode.flag_control_manual_enabled ? "true" : "false");
+		PX4_INFO("  Attitude enabled: %s", _vehicle_control_mode.flag_control_attitude_enabled ? "true" : "false");
+		PX4_INFO("  Altitude enabled: %s", _vehicle_control_mode.flag_control_altitude_enabled ? "true" : "false");
+		PX4_INFO("  Position enabled: %s", _vehicle_control_mode.flag_control_position_enabled ? "true" : "false");
+		PX4_INFO("  Velocity enabled: %s", _vehicle_control_mode.flag_control_velocity_enabled ? "true" : "false");
+		
+		// Reset counter
+		PX4_INFO("Reset Counter:");
+		PX4_INFO("  Quaternion reset counter: %u", _quat_reset_counter);
+		
+		return PX4_OK;
+	}
+	
+	PX4_WARN("Unknown command: %s", argv[0]);
+	return custom_command_instance(0, nullptr); // Show usage
 }
 
 

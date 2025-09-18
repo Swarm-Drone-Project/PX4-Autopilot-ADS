@@ -81,6 +81,11 @@ public:
 
 	bool init();
 
+	/**
+	 * Handle custom commands for performance monitoring and variable inspection
+	 */
+	int custom_command_instance(int argc, char *argv[]);
+
 private:
 	void Run() override;
 
