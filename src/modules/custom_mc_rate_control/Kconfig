@@ -1,0 +1,9 @@
+menuconfig MODULES_CUSTOM_MC_RATE_CONTROL
+    bool "custom_mc_rate_control"
+    default n
+    ---help---
+        Enable support for a minimal custom multicopter rate controller.
+
+        This module provides a lightweight rate controller intended for
+        aggressive maneuvering, where arbitrary torque vectoring is
+        required and additional filtering is undesirable.
