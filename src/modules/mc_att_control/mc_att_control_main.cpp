@@ -523,7 +523,7 @@ int MulticopterAttitudeControl::custom_command_instance(int argc, char *argv[])
 		PX4_INFO("Control Parameters:");
 		PX4_INFO("  Manual tilt max: %.3f rad (%.1f deg)", (double)_man_tilt_max, (double)math::degrees(_man_tilt_max));
 		PX4_INFO("  Yaw setpoint stabilized: %.3f rad (%.1f deg)", (double)_yaw_setpoint_stabilized, (double)math::degrees(_yaw_setpoint_stabilized));
-		PX4_INFO("  Heading good for control: %s", _heading_good_for_control ? "true" : "false");
+		// PX4_INFO("  Heading good for control: %s", _heading_good_for_control ? "true" : "false");
 		PX4_INFO("  Unaided heading: %.3f rad (%.1f deg)", (double)_unaided_heading, (double)math::degrees(_unaided_heading));
 		
 		// Thrust and throttle
