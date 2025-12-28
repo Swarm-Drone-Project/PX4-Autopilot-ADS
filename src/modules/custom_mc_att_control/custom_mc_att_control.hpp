@@ -12,6 +12,7 @@
 #include <uORB/topics/vehicle_attitude.h>
 #include <uORB/topics/vehicle_attitude_setpoint.h>
 #include <uORB/topics/vehicle_rates_setpoint.h>
+#include <uORB/topics/vehicle_control_mode.h>
 
 #include <matrix/matrix/math.hpp>
 #include <perf/perf_counter.h>
@@ -54,6 +55,7 @@ private:
     // Subscriptions
     uORB::SubscriptionCallbackWorkItem _vehicle_attitude_sub{this, ORB_ID(vehicle_attitude)};
     uORB::Subscription _vehicle_attitude_setpoint_sub{ORB_ID(vehicle_attitude_setpoint)};
+    uORB::Subscription _vehicle_control_mode_sub{ORB_ID(vehicle_control_mode)};
 
     // Publications
     uORB::Publication<vehicle_rates_setpoint_s> _vehicle_rates_setpoint_pub{ORB_ID(vehicle_rates_setpoint)};
@@ -62,6 +64,9 @@ private:
     matrix::Vector3f _attitude_error_integral{0.f, 0.f, 0.f};
     matrix::Vector3f _attitude_error_previous{0.f, 0.f, 0.f};
     hrt_abstime _last_run{0};
+
+    // Cached data from subscriptions
+    vehicle_control_mode_s _vehicle_control_mode{};
 
     // Performance monitoring (critical for flight control)
     perf_counter_t _loop_perf;          ///< loop performance counter
