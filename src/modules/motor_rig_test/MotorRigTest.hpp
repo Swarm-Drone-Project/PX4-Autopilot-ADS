@@ -90,6 +90,14 @@ private:
 	void publish_actuator_test(int motor_index_1based, uint8_t action, float value);
 	float motor_thrust_param(int motor_index_0based) const;
 
+	// Forces the logger to open (enable=true) or release (enable=false) a
+	// ulog file regardless of arm state, via the same manual override the
+	// `logger on` / `logger off` shell commands use. Needed because this
+	// module intentionally never arms (it refuses to command anything while
+	// armed) - without this, PX4's default arm-gated logging would never
+	// capture a run of this test.
+	void set_logging_override(bool enable);
+
 	uORB::Subscription _actuator_armed_sub{ORB_ID(actuator_armed)};
 	uORB::Subscription _parameter_update_sub{ORB_ID(parameter_update)};
 	uORB::Subscription _vehicle_status_sub{ORB_ID(vehicle_status)};

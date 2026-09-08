@@ -34,8 +34,14 @@
 #include "MotorRigTest.hpp"
 
 #include <inttypes.h>
+#include <string.h>
 
 #include <mathlib/math/Limits.hpp>
+
+// Same entry point the `logger on` / `logger off` shell commands invoke;
+// linked into the same firmware image, so calling it directly here reaches
+// Logger::set_arm_override() with no new logging mechanism required.
+extern "C" __EXPORT int logger_main(int argc, char *argv[]);
 
 ModuleBase::Descriptor MotorRigTest::desc{task_spawn, custom_command, print_usage};
 
@@ -80,6 +86,15 @@ void MotorRigTest::publish_actuator_test(int motor_index_1based, uint8_t action,
 	++_tests_published;
 }
 
+void MotorRigTest::set_logging_override(bool enable)
+{
+	char argv0[] = "logger";
+	char argv1_on[] = "on";
+	char argv1_off[] = "off";
+	char *argv[] = {argv0, enable ? argv1_on : argv1_off, nullptr};
+	logger_main(2, argv);
+}
+
 float MotorRigTest::motor_thrust_param(int motor_index_0based) const
 {
 	switch (motor_index_0based) {
@@ -103,6 +118,8 @@ void MotorRigTest::Run()
 		}
 
 		_active_mask = 0;
+
+		set_logging_override(false);
 
 		ScheduleClear();
 		exit_and_cleanup(desc);
@@ -143,6 +160,8 @@ void MotorRigTest::Run()
 		}
 
 		_active_mask = 0;
+
+		set_logging_override(false);
 
 		ScheduleClear();
 		exit_and_cleanup(desc);
@@ -202,6 +221,12 @@ int MotorRigTest::task_spawn(int argc, char *argv[])
 		desc.task_id = task_id_is_work_queue;
 
 		if (instance->init()) {
+			// This module deliberately never arms (it's a props-off bench
+			// test), so PX4's default arm-gated logging would otherwise
+			// never capture a run. Force a ulog open for the module's
+			// lifetime instead; Run() releases the override on every exit
+			// path.
+			instance->set_logging_override(true);
 			return PX4_OK;
 		}
 
