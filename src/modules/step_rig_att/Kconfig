@@ -1,0 +1,30 @@
+menuconfig MODULES_STEP_RIG_ATT
+	bool "step_rig_att"
+	default n
+	---help---
+		Enable support for step_rig_att
+
+		Test instrument that publishes a commanded attitude as a STEP
+		and holds it, so the closed-loop step response of the attitude
+		controller - rise time, peak time, overshoot, settling time -
+		can be measured directly. Driven through the ATTITUDE setpoint
+		path (mc_att_control) instead of raw body rates.
+
+		The deliberate opposite of hold_rig_att. That module walks a
+		leader setpoint to the target at HRATT_RATE so the controller
+		never sees a large error; useful for moving a rig gently, but
+		it means the observed trajectory belongs to the ramp rather
+		than to the control law. Here nothing shapes the command, so
+		the whole transient - saturation included - is the plant under
+		test.
+
+		The target is Eulerf(STEPATT_ROLL, STEPATT_PITCH, 0): absolute
+		and zero-yaw, never composed onto a latched heading, so repeat
+		runs are comparable. Thrust is fixed at STEPATT_THRUST with no
+		compensation, so the vehicle descends while held at a large
+		tilt - run it high, or on a fixture that cannot translate.
+
+		Never touches position/GPS - start with `step_rig_att start`
+		and do not run it alongside another OFFBOARD-publishing module.
+		Requires FD_FAIL_R/FD_FAIL_P to be relaxed past 60 degrees: a
+		step trips the detector mid-rise and voids the run.

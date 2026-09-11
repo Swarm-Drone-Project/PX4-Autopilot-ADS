@@ -1,0 +1,168 @@
+module_name: step_rig_att
+parameters:
+- group: Step Rig Att
+  definitions:
+    STEPATT_EN:
+      description:
+        short: Enable the step-response attitude test controller
+        long: |
+          When enabled, step_rig_att continuously streams a live
+          attitude-tracking setpoint once it has a valid attitude estimate
+          (required for commander to admit the OFFBOARD switch at all - no
+          position estimate is ever needed, this module never touches
+          position). The moment OFFBOARD is engaged it publishes the commanded
+          attitude as a STEP and holds it unchanged for as long as OFFBOARD
+          stays engaged. Leaving OFFBOARD arms a fresh step. Publishes nothing
+          while disabled.
+
+          Defaults to 0 for the same reason HRATT_EN does. This module
+          publishes the same two topics as hold_rig_att, flip_rig_axis and
+          their siblings (offboard_control_mode and vehicle_attitude_setpoint),
+          and mc_att_control performs no publisher-identity check whatsoever -
+          it accepts whichever setpoint carries the newest timestamp. Two of
+          these modules running at once therefore do not "conflict" in any
+          detectable way; they silently interleave at loop rate and the vehicle
+          chases the average. On a step-response measurement that reads as an
+          inexplicably sluggish or noisy rise. Enabling this one is an explicit
+          statement that no other OFFBOARD publisher is running.
+      type: boolean
+      default: 0
+
+    STEPATT_ROLL:
+      description:
+        short: Commanded Euler roll of the step target
+        long: |
+          Body roll of the commanded attitude, in PX4's intrinsic Z-Y-X Euler
+          convention. Yaw is always zero and is NOT latched from the vehicle's
+          heading (contrast HRATT_ROLL, which is applied on top of the yaw
+          latched at OFFBOARD entry). The target is therefore absolute: the
+          same parameters command the same attitude on every run, whichever way
+          the vehicle happens to be facing, which is what makes successive runs
+          comparable.
+
+          Set this alone (with STEPATT_PITCH at 0) for a single-axis roll step,
+          which is the cleanest case to read a rise time from - the roll axis
+          is then the only one being excited.
+
+          This is also exactly the quantity FailureDetector compares against
+          FD_FAIL_R, so any value past that threshold (60 degrees by default)
+          trips the detector about 0.3 s into the step, mid-rise. Set FD_FAIL_R
+          to 0 before testing large angles.
+
+          Beyond about 60 degrees the roll/pitch pair also stops behaving the
+          way the numbers suggest when BOTH are nonzero, because Z-Y-X applies
+          the pitch about the already-rolled axis; at exactly 90 degrees of
+          roll, STEPATT_PITCH has no effect on tilt at all. See STEPATT_PITCH.
+      type: float
+      default: 0.0
+      min: -180.0
+      max: 180.0
+      unit: deg
+      decimal: 1
+
+    STEPATT_PITCH:
+      description:
+        short: Commanded Euler pitch of the step target
+        long: |
+          Body pitch of the commanded attitude, in PX4's intrinsic Z-Y-X Euler
+          convention - applied after the (always zero) yaw and before
+          STEPATT_ROLL, about the body y axis.
+
+          Set this alone (with STEPATT_ROLL at 0) for a single-axis pitch step.
+          Set both for a combined two-axis step, but read the caveat below
+          first, because a combined command at large angles does not do what the
+          two numbers suggest.
+
+          In Z-Y-X the pitch is applied about the ALREADY-ROLLED axis. Once roll
+          reaches 90 degrees the body y axis has rotated onto the world
+          vertical, so pitching about it no longer tilts the airframe - the body
+          z axis sits at [0, -1, 0] for every pitch value. The pitch command is
+          not discarded: it becomes a rotation about the (now horizontal) body z
+          axis, which AttitudeControl::update() separates out as delta-yaw and
+          scales by MC_YAW_WEIGHT (0.4 by default) because yaw is the weakest
+          axis a multicopter has. A commanded roll 79 / pitch 120 therefore
+          executes as a large tilt at full authority plus a large delta-yaw at
+          40% weight on the weakest axis, and the measured pitch response will
+          look slow or absent for reasons that have nothing to do with the pitch
+          loop's tuning.
+
+          That is a property of commanding Euler roll and pitch, not a defect to
+          be corrected here. Single-axis steps are what to measure loop
+          performance from; combined large-angle steps measure the coupling.
+
+          A second, purely cosmetic consequence: Euler extraction is not
+          injective, so the roll/pitch read back from the attitude estimate will
+          not always match what was commanded even when the orientation is
+          exactly right. Commanded (roll 45, pitch 90) reads back as
+          (roll 26.6, pitch 90). Keep that in mind when computing overshoot
+          against a large commanded pitch.
+      type: float
+      default: 0.0
+      min: -180.0
+      max: 180.0
+      unit: deg
+      decimal: 1
+
+    STEPATT_THRUST:
+      description:
+        short: Normalized body-Z thrust held throughout the step
+        long: |
+          Passed straight through as thrust_body[2] during both tracking and the
+          step (negative = upward in PX4's body frame). Unlike HRATT_THRUST
+          there is no sentinel value that pulls MPC_THR_HOVER instead, and
+          unlike HRATT_THRUST_K there is no tilt-dependent boost: the value set
+          here is the value published, at every attitude, for the whole run.
+
+          That is deliberate. Any thrust schedule that varies with the commanded
+          attitude couples the collective channel to the transient being
+          measured, and a rise time measured against a moving thrust is not a
+          clean measurement of the attitude loop. A constant is the only value
+          that stays out of the way.
+
+          The consequence is that lift authority falls with cos(tilt) and
+          reverses past 90 degrees, so the vehicle descends - fast - while
+          holding a large commanded attitude:
+
+            tilt   0 deg -> 100% of thrust opposes gravity
+            tilt  30 deg ->  87%
+            tilt  60 deg ->  50%
+            tilt  90 deg ->   0%  (body z horizontal, no lift at all)
+            tilt 120 deg -> -25%  (inverted: thrust now pushes DOWNWARD)
+
+          This is expected and is why the SITL procedure starts several hundred
+          metres up: the attitude transient completes in a second or two, long
+          before the altitude spent on it matters. On a physical rig that
+          cannot translate it matters not at all. Do not fly this on a free
+          vehicle at low altitude.
+
+          The default of -0.2 is modest on purpose - enough to keep the rotors
+          spinning and the allocator in its linear region, low enough that the
+          descent during a large-angle hold is not violent. -0.5 is where the
+          mixer has the most symmetric motor headroom, min(u0, 1-u0), and is
+          worth using if a step saturates a motor at its floor.
+      type: float
+      default: -0.2
+      min: -1.0
+      max: 0.0
+      decimal: 2
+
+    STEPATT_PUB_HZ:
+      description:
+        short: Internal publish rate for offboard_control_mode + setpoints
+        long: |
+          Must be high enough (>= 25 Hz) to keep the commander OFFBOARD
+          heartbeat alive; the module clamps to that floor regardless of what is
+          set here, because losing the heartbeat drops the mode mid-test and
+          reads as a control failure in the log when it is not one.
+
+          Unlike HRATT_PUB_HZ this rate does not set any integration step -
+          there is nothing being integrated, the same quaternion is republished
+          every cycle. It only bounds how precisely the step's leading edge is
+          placed in time, so the default of 100 Hz (10 ms) is already far finer
+          than any rise time worth measuring. Applied at module start; runtime
+          changes take effect on the next parameter-update tick.
+      type: int32
+      default: 100
+      min: 25
+      max: 250
+      unit: Hz
