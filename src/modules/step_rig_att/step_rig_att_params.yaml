@@ -28,10 +28,149 @@ parameters:
       type: boolean
       default: 0
 
+    STEPATT_MODE:
+      description:
+        short: How the target orientation is specified
+        long: |
+          Selects which pair of parameters defines the step target. Yaw is
+          always zero in both modes; neither mode commands a yaw of its own.
+
+            0 -> TILT + DIRECTION (STEPATT_TILT, STEPATT_DIR)
+            1 -> EULER ROLL + PITCH (STEPATT_ROLL, STEPATT_PITCH)
+
+          Mode 0 is the default and is the one to use for anything other than a
+          single-axis test. The two modes can express the same orientations, but
+          mode 1 quietly stops meaning what it says once BOTH angles are large,
+          and mode 0 never does.
+
+          Why mode 1 degrades: PX4 Euler angles are intrinsic Z-Y-X, so the
+          commanded pitch is applied about the ALREADY-ROLLED axis. The result
+          is an orientation that contains a rotation about the body z axis -
+          delta-yaw - which is not what the operator asked for and not something
+          a multicopter can deliver. AttitudeControl::update() splits every
+          attitude error into a tilt part and a yaw part, gives the tilt part
+          full authority, and scales the yaw part by MC_YAW_WEIGHT (0.4 by
+          default) because a multicopter has far less torque about body z than
+          about body x or y - yaw comes only from differential rotor drag.
+
+          Worked example, the one this mode was added for. Commanding
+          STEPATT_ROLL 65 with STEPATT_PITCH 60 gives:
+
+            total tilt from vertical : 77.8 deg
+            tilt-only part           : roll 76.9, pitch 21.5, yaw 17.1
+            leftover delta-yaw       : 40.4 deg
+
+          So 40 degrees of that command land on the weakest axis and never
+          really arrive. On the vehicle it reads as "the roll arrived and the
+          pitch never did". Single-axis commands (roll alone, pitch alone) have
+          exactly zero delta-yaw at any angle, which is why those always worked.
+
+          Mode 0 avoids all of it by naming the lean directly: a rotation about
+          a horizontal axis has no yaw component whatsoever, at any tilt and in
+          any direction, so the controller delivers all of it on the two strong
+          axes.
+
+          Startup diagnostics always print the mode-0 equivalent of a mode-1
+          command together with its delta-yaw share, so the translation can be
+          read straight out of the log.
+      type: int32
+      default: 0
+      min: 0
+      max: 1
+      values:
+        0: Tilt magnitude + direction
+        1: Euler roll + pitch
+
+    STEPATT_TILT:
+      description:
+        short: Total lean angle away from level (STEPATT_MODE 0)
+        long: |
+          Angle between the body z axis and vertical at the commanded attitude,
+          i.e. how far the airframe leans, irrespective of which way. 0 is level.
+
+          This is a true tilt magnitude and stays meaningful across the whole
+          range - there is no value at which it stops changing the orientation
+          or silently trades tilt for yaw, which is exactly what
+          STEPATT_ROLL/STEPATT_PITCH do once both are large. It also means the
+          same thing in every direction: a diagonal command leans exactly as far
+          as an on-axis one.
+
+          Note what happens to lift authority on the way up. Thrust is a fixed
+          passthrough (STEPATT_THRUST) with no 1/cos(tilt) compensation - the
+          position controller normally does that and is not in the loop here:
+
+            tilt   0 deg -> 100% of thrust opposes gravity
+            tilt  30 deg ->  87%
+            tilt  60 deg ->  50%
+            tilt  90 deg ->   0%  (body z horizontal, no lift at all)
+            tilt 120 deg -> -25%  (inverted: thrust now pushes DOWNWARD)
+
+          The vehicle descends throughout a large-angle hold. That is expected
+          here - see STEPATT_THRUST - and is why the SITL procedure starts the
+          test several hundred metres up.
+      type: float
+      default: 0.0
+      min: 0.0
+      max: 180.0
+      unit: deg
+      decimal: 1
+
+    STEPATT_DIR:
+      description:
+        short: Direction the airframe leans (STEPATT_MODE 0)
+        long: |
+          Which way the airframe leans, measured in the body xy-plane from body
+          x (the nose) toward body y (the right wing). Because yaw is always
+          held at zero, the nose points north, so this reads directly as a
+          compass bearing:
+
+              0 deg -> leans toward the nose,       north  (nose-down pitch)
+             45 deg -> leans toward the north-east
+             90 deg -> leans toward the right wing, east   (right roll)
+            135 deg -> leans toward the south-east
+            180 deg -> leans toward the tail,       south  (nose-up pitch)
+            270 deg -> leans toward the left wing,  west   (left roll)
+
+          So "lean 45 degrees toward the north-east" is STEPATT_TILT 45 with
+          STEPATT_DIR 45, and it is fully achievable because it contains no
+          delta-yaw - see STEPATT_MODE.
+
+          IMPORTANT, if comparing with hold_rig_att: HRATT_DIR names the
+          rotation AXIS, not the lean, and the two differ by 90 degrees. Leaning
+          right means rotating about the nose. HRATT_DIR 0 is a right roll,
+          whereas STEPATT_DIR 0 is nose-down. The convention here was chosen to
+          match how a target is usually described ("lean this way"), not how the
+          rotation is constructed.
+
+          Do not expect the Euler readback to echo these numbers. A correct
+          tilt 45 / dir 45 hold reads back as roll 35.3, pitch -30.0, yaw -9.7 -
+          the same orientation expressed differently, because Euler extraction
+          is not injective. Judge the result by tilt magnitude, which is what
+          `step_rig_att status` reports.
+
+          Torque authority is not identical in every direction. On a quadrotor
+          in X configuration the diagonal lean directions put the rotation axis
+          straight along a motor arm, where the two rotors on that axis have no
+          moment arm, so only two rotors do the work and the mixer clips at
+          about 71% of what a pure roll or pure pitch gets. Expect a slightly
+          slower rise time on the diagonals; consider MC_AIRMODE >= 1 so the
+          mixer preserves roll/pitch authority instead of stealing collective
+          thrust when it saturates.
+      type: float
+      default: 0.0
+      min: 0.0
+      max: 360.0
+      unit: deg
+      decimal: 1
+
     STEPATT_ROLL:
       description:
-        short: Commanded Euler roll of the step target
+        short: Commanded Euler roll of the step target (STEPATT_MODE 1 only)
         long: |
+          Ignored unless STEPATT_MODE is 1. Safe on its own at any angle, but
+          read STEPATT_MODE before combining it with STEPATT_PITCH: together
+          they stop describing the attitude they appear to.
+
           Body roll of the commanded attitude, in PX4's intrinsic Z-Y-X Euler
           convention. Yaw is always zero and is NOT latched from the vehicle's
           heading (contrast HRATT_ROLL, which is applied on top of the yaw
@@ -62,8 +201,12 @@ parameters:
 
     STEPATT_PITCH:
       description:
-        short: Commanded Euler pitch of the step target
+        short: Commanded Euler pitch of the step target (STEPATT_MODE 1 only)
         long: |
+          Ignored unless STEPATT_MODE is 1. This is the parameter that goes
+          quietly ineffective when STEPATT_ROLL is also large - use
+          STEPATT_MODE 0 for any two-axis lean.
+
           Body pitch of the commanded attitude, in PX4's intrinsic Z-Y-X Euler
           convention - applied after the (always zero) yaw and before
           STEPATT_ROLL, about the body y axis.

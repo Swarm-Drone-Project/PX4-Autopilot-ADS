@@ -37,8 +37,15 @@ px4_add_module(
 	SRCS
 		StepRigAtt.cpp
 		StepRigAtt.hpp
+		StepAttMath.hpp
 	MODULE_CONFIG
 		step_rig_att_params.yaml
 	DEPENDS
 		px4_work_queue
 )
+
+# StepAttMath.hpp is header-only and free of uORB/parameters/timers, so both
+# target parameterizations and the tilt/direction/delta-yaw decomposition can be
+# tested without standing up the module. The direction convention is what a
+# combined command got wrong in the field, so it is worth pinning down.
+px4_add_unit_gtest(SRC StepAttMathTest.cpp)

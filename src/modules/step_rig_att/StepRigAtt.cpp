@@ -42,6 +42,11 @@
 using matrix::Eulerf;
 using matrix::Quatf;
 
+using step_rig_att::decompose;
+using step_rig_att::target_euler;
+using step_rig_att::target_tilt_direction;
+using step_rig_att::TargetMode;
+
 ModuleBase::Descriptor StepRigAtt::desc{task_spawn, custom_command, print_usage};
 
 StepRigAtt::StepRigAtt() :
@@ -57,19 +62,24 @@ bool StepRigAtt::init()
 	return true;
 }
 
+Quatf StepRigAtt::target_from_params() const
+{
+	if (static_cast<TargetMode>(_param_stepatt_mode.get()) == TargetMode::EulerRollPitch) {
+		return target_euler(_param_stepatt_roll.get(), _param_stepatt_pitch.get());
+	}
+
+	// Tilt + direction: a rotation about a HORIZONTAL axis, so it asks for no
+	// yaw rotation at all and the controller can deliver every degree of it on
+	// the two strong axes. See STEPATT_DIR.
+	return target_tilt_direction(_param_stepatt_tilt.get(), _param_stepatt_dir.get());
+}
+
 void StepRigAtt::build_target()
 {
-	// The whole module in one line. Intrinsic Z-Y-X with yaw held at zero, so
-	// this is exactly the orientation FD_FAIL_R/FD_FAIL_P and an Euler
-	// readback both name - which is what makes the commanded numbers directly
-	// comparable to the logged response when computing rise/settling times.
-	//
-	// No latched yaw is composed in (contrast hold_rig_att::build_target()).
-	// The target is absolute, so repeating a run with the vehicle pointing a
-	// different way commands the same attitude and yields a comparable
-	// measurement.
-	_q_target = Quatf(Eulerf(math::radians(_param_stepatt_roll.get()),
-				 math::radians(_param_stepatt_pitch.get()), 0.f));
+	// The target is absolute and zero-yaw: no latched heading is composed in,
+	// so repeating a run with the vehicle pointing a different way commands
+	// the same attitude and yields a comparable measurement.
+	_q_target = target_from_params();
 	_q_target.normalize();
 }
 
@@ -125,21 +135,60 @@ void StepRigAtt::parameters_updated()
 		ScheduleOnInterval(_schedule_interval_us);
 	}
 
+	check_euler_degeneracy();
 	check_failure_detector();
 	check_rig_disarm_params();
 	check_sibling_modules();
 }
 
+void StepRigAtt::check_euler_degeneracy() const
+{
+	if (static_cast<TargetMode>(_param_stepatt_mode.get()) != TargetMode::EulerRollPitch) {
+		return;
+	}
+
+	float tilt_deg = 0.f;
+	float dir_deg = 0.f;
+	float dyaw_deg = 0.f;
+	decompose(target_euler(_param_stepatt_roll.get(), _param_stepatt_pitch.get()),
+		  tilt_deg, dir_deg, dyaw_deg);
+
+	// Printed for every mode-1 command, degenerate or not: it is the one line
+	// that says what the vehicle will actually do, and it hands over the
+	// mode-0 parameters that reproduce the same lean.
+	PX4_INFO("MODE 1 roll %.0f pitch %.0f == tilt %.0f deg, dir %.0f deg, plus %.0f deg delta-yaw.",
+		 (double)_param_stepatt_roll.get(), (double)_param_stepatt_pitch.get(),
+		 (double)tilt_deg, (double)dir_deg, (double)dyaw_deg);
+
+	if (fabsf(dyaw_deg) <= 15.f) {
+		return;
+	}
+
+	// Past this the command is no longer the attitude it looks like. The
+	// delta-yaw share is not discarded - AttitudeControl::update() splits it
+	// out and scales it by MC_YAW_WEIGHT (0.4 by default) because yaw is the
+	// weakest axis a multicopter has - so on the vehicle it reads as "the roll
+	// arrived and the pitch never did".
+	PX4_ERR("%.0f deg of this command is delta-yaw, run at MC_YAW_WEIGHT on the weakest axis.",
+		(double)fabsf(dyaw_deg));
+	PX4_ERR("It will not arrive. Use STEPATT_MODE 0 with STEPATT_TILT %.0f, STEPATT_DIR %.0f.",
+		(double)tilt_deg, (double)dir_deg);
+}
+
 void StepRigAtt::check_failure_detector() const
 {
 	// FailureDetector::updateAttitudeStatus() compares EULER roll and pitch
-	// against FD_FAIL_R/FD_FAIL_P, and the target here IS a Euler roll/pitch
-	// pair - so unlike hold_rig_att, which has to decompose a tilt/direction
-	// target first, the commanded parameters are already the compared
-	// quantities. The check is gated on flag_control_attitude_enabled, which
-	// attitude-mode OFFBOARD sets, so it is armed for the entire run.
-	const float roll_deg = fabsf(_param_stepatt_roll.get());
-	const float pitch_deg = fabsf(_param_stepatt_pitch.get());
+	// against FD_FAIL_R/FD_FAIL_P, so those are the quantities to check - not
+	// the tilt magnitude, which is a different number. Taken from the built
+	// target rather than the parameters, because in tilt+direction mode the
+	// commanded numbers are not Euler angles at all: tilt 45 / dir 45 is Euler
+	// roll 35.3 / pitch -30.
+	//
+	// The check is gated on flag_control_attitude_enabled, which attitude-mode
+	// OFFBOARD sets, so it is armed for the entire run.
+	const Eulerf euler(target_from_params());
+	const float roll_deg = fabsf(math::degrees(euler.phi()));
+	const float pitch_deg = fabsf(math::degrees(euler.theta()));
 
 	float fail_r = 0.f;
 	float fail_p = 0.f;
@@ -351,9 +400,16 @@ void StepRigAtt::Run()
 
 		warn_if_inside_arm_lockdown(now);
 
-		PX4_INFO("STEP: roll %.1f deg, pitch %.1f deg, thrust %.2f - response is now mc_att_control's.",
-			 (double)_param_stepatt_roll.get(), (double)_param_stepatt_pitch.get(),
-			 (double)_param_stepatt_thrust.get());
+		// Report the step as tilt and direction whichever mode built it: that
+		// is the pair the vehicle will actually fly, and in euler mode it is
+		// the number that differs from what was typed.
+		float tilt_deg = 0.f;
+		float dir_deg = 0.f;
+		float dyaw_deg = 0.f;
+		decompose(_q_target, tilt_deg, dir_deg, dyaw_deg);
+
+		PX4_INFO("STEP: tilt %.1f deg, dir %.1f deg, thrust %.2f - response is now mc_att_control's.",
+			 (double)tilt_deg, (double)dir_deg, (double)_param_stepatt_thrust.get());
 	}
 
 	publish_step();
@@ -383,12 +439,36 @@ int StepRigAtt::task_spawn(int argc, char *argv[])
 
 int StepRigAtt::print_status()
 {
-	PX4_INFO("enabled=%d roll=%.1f deg pitch=%.1f deg thrust=%.2f pub_hz=%" PRId32,
-		 (int)_param_stepatt_en.get(),
-		 (double)_param_stepatt_roll.get(),
-		 (double)_param_stepatt_pitch.get(),
-		 (double)_param_stepatt_thrust.get(),
-		 (int32_t)_param_stepatt_pub_hz.get());
+	const bool euler_mode = (static_cast<TargetMode>(_param_stepatt_mode.get()) == TargetMode::EulerRollPitch);
+
+	if (euler_mode) {
+		PX4_INFO("enabled=%d mode=euler roll=%.1f pitch=%.1f thrust=%.2f pub_hz=%" PRId32,
+			 (int)_param_stepatt_en.get(),
+			 (double)_param_stepatt_roll.get(),
+			 (double)_param_stepatt_pitch.get(),
+			 (double)_param_stepatt_thrust.get(),
+			 (int32_t)_param_stepatt_pub_hz.get());
+
+	} else {
+		PX4_INFO("enabled=%d mode=tilt+dir tilt=%.1f dir=%.1f thrust=%.2f pub_hz=%" PRId32,
+			 (int)_param_stepatt_en.get(),
+			 (double)_param_stepatt_tilt.get(),
+			 (double)_param_stepatt_dir.get(),
+			 (double)_param_stepatt_thrust.get(),
+			 (int32_t)_param_stepatt_pub_hz.get());
+	}
+
+	// The decomposition rather than an Euler readback: Euler extraction is not
+	// injective near pitch = +-90, so it prints a different triple for the same
+	// orientation, and it cannot show the delta-yaw share at all - which is the
+	// one number that says whether the command will actually arrive.
+	float tilt_deg = 0.f;
+	float dir_deg = 0.f;
+	float dyaw_deg = 0.f;
+	decompose(target_from_params(), tilt_deg, dir_deg, dyaw_deg);
+
+	PX4_INFO("target: tilt=%.1f deg dir=%.1f deg delta_yaw=%.1f deg",
+		 (double)tilt_deg, (double)dir_deg, (double)dyaw_deg);
 
 	PX4_INFO("q_target=[%.4f %.4f %.4f %.4f] (yaw 0, absolute)",
 		 (double)_q_target(0), (double)_q_target(1), (double)_q_target(2), (double)_q_target(3));
@@ -427,12 +507,43 @@ overshoot, settling time - can be measured directly. It is a test instrument,
 not a flight mode.
 
 Start it with `step_rig_att start`. The instant OFFBOARD is engaged it builds
-`q_target = Quatf(Eulerf(STEPATT_ROLL, STEPATT_PITCH, 0))` and publishes that
-same quaternion every cycle for as long as OFFBOARD stays engaged, with
-STEPATT_THRUST passed straight through as thrust_body[2]. Leaving OFFBOARD
-re-arms it for a fresh step. Before OFFBOARD it mirrors the live attitude, which
-is what lets commander admit the mode switch at all. It never touches position
-or GPS.
+the target from STEPATT_MODE and publishes that same quaternion every cycle for
+as long as OFFBOARD stays engaged, with STEPATT_THRUST passed straight through
+as thrust_body[2]. Leaving OFFBOARD re-arms it for a fresh step. Before OFFBOARD
+it mirrors the live attitude, which is what lets commander admit the mode switch
+at all. It never touches position or GPS.
+
+#### Say where to lean, not how to roll
+
+STEPATT_MODE 0 (the default) takes a lean angle and a direction:
+
+    STEPATT_TILT  how far to lean from vertical
+    STEPATT_DIR   which way, 0 = toward the nose/north, 90 = right wing/east
+
+so "lean 45 degrees toward the north-east" is TILT 45, DIR 45. Yaw is always
+zero, so the nose points north and STEPATT_DIR reads as a compass bearing.
+
+STEPATT_MODE 1 takes Euler roll and pitch instead, and exists because
+single-axis steps are the cleanest thing to measure a rise time from. Use it for
+roll-only or pitch-only tests. Do NOT use it for a two-axis lean: in intrinsic
+Z-Y-X the pitch is applied about the already-rolled axis, so the resulting
+orientation contains a rotation about body z. AttitudeControl::update() splits
+that out as delta-yaw and scales it by MC_YAW_WEIGHT (0.4) because yaw is the
+weakest axis a multicopter has - it comes only from differential rotor drag. A
+commanded roll 65 / pitch 60 is really
+
+    tilt 77.8 deg  +  40.4 deg of delta-yaw
+
+and those 40 degrees never arrive: on the vehicle it reads as "the roll arrived
+and the pitch never did". Mode 0 has exactly zero delta-yaw at any tilt in any
+direction, so all of it is delivered on the two strong axes. The startup
+diagnostic prints the mode-0 equivalent of any mode-1 command, including its
+delta-yaw share.
+
+Judge the result by tilt, not by an Euler readback: a correct TILT 45 / DIR 45
+hold reads back as roll 35.3, pitch -30.0, yaw -9.7 - the same orientation, a
+different triple, because Euler extraction is not injective.
+`step_rig_att status` reports tilt, direction and delta-yaw for that reason.
 
 #### Why this is the opposite of hold_rig_att
 

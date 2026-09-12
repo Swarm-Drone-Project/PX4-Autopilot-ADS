@@ -39,6 +39,8 @@
 #include <matrix/matrix/math.hpp>
 #include <px4_platform_common/defines.h>
 
+#include "StepAttMath.hpp"
+
 #include <px4_platform_common/module.h>
 #include <px4_platform_common/module_params.h>
 #include <px4_platform_common/px4_work_queue/ScheduledWorkItem.hpp>
@@ -126,15 +128,24 @@ private:
 	// that never reports a takeoff.
 	void check_rig_disarm_params() const;
 	void check_sibling_modules() const;
+	// In STEPATT_MODE 1, reports how much of the commanded roll/pitch pair is
+	// really delta-yaw - the part the controller executes at MC_YAW_WEIGHT on
+	// the weakest axis, and which therefore does not arrive. Always prints the
+	// equivalent mode-0 command so the fix can be read straight out of the log.
+	void check_euler_degeneracy() const;
 
 	void publish_setpoint(hrt_abstime now, const matrix::Quatf &q_sp);
 	void publish_track_current_attitude();
 	// The step itself: publish _q_target, unchanged, every cycle.
 	void publish_step();
 
-	// q_target = Quatf(Eulerf(STEPATT_ROLL, STEPATT_PITCH, 0)). Absolute and
-	// zero-yaw by design - no latched yaw is composed in, unlike
-	// hold_rig_att::build_target().
+	// The target the current parameters describe, without latching anything.
+	// Shared by build_target() and the diagnostics, so a check can never
+	// disagree with what will actually be commanded.
+	matrix::Quatf target_from_params() const;
+
+	// Latches target_from_params() into _q_target. Absolute and zero-yaw
+	// whichever mode is selected - no latched yaw is ever composed in.
 	void build_target();
 
 	// One-shot warning if the step lands inside the post-arm window where an
@@ -185,6 +196,9 @@ private:
 
 	DEFINE_PARAMETERS(
 		(ParamBool<px4::params::STEPATT_EN>) _param_stepatt_en,
+		(ParamInt<px4::params::STEPATT_MODE>) _param_stepatt_mode,
+		(ParamFloat<px4::params::STEPATT_TILT>) _param_stepatt_tilt,
+		(ParamFloat<px4::params::STEPATT_DIR>) _param_stepatt_dir,
 		(ParamFloat<px4::params::STEPATT_ROLL>) _param_stepatt_roll,
 		(ParamFloat<px4::params::STEPATT_PITCH>) _param_stepatt_pitch,
 		(ParamFloat<px4::params::STEPATT_THRUST>) _param_stepatt_thrust,
